@@ -61,8 +61,15 @@ num_layers = 2
 learning_rate = 0.001
 num_epochs = 10
 batch_size = 32
+grad_accum_steps = 2  # Accumulate gradients over this many steps
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Determine the device to use (CUDA, MPS for M1 Macs, or CPU)
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
 model = TranslationModel(input_vocab_size, output_vocab_size, embedding_dim, hidden_dim, num_layers).to(device)
 criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
@@ -73,14 +80,14 @@ train_loader = DataLoader(tokenized_datasets["train"], batch_size=batch_size, sh
 val_loader = DataLoader(tokenized_datasets["validation"], batch_size=batch_size, collate_fn=collate_fn)
 
 # Training function
-def train(model, loader, criterion, optimizer, device):
+def train(model, loader, criterion, optimizer, device, grad_accum_steps):
     model.train()
     epoch_loss = 0
-    for batch in tqdm(loader, desc="Training", leave=False):
+    optimizer.zero_grad()
+    for i, batch in enumerate(tqdm(loader, desc="Training", leave=False)):
         input_seq = batch["input_ids"].to(device)
         target_seq = batch["labels"].to(device)
         
-        optimizer.zero_grad()
         output = model(input_seq, target_seq[:, :-1])
         
         output_dim = output.shape[-1]
@@ -89,7 +96,10 @@ def train(model, loader, criterion, optimizer, device):
         
         loss = criterion(output, target)
         loss.backward()
-        optimizer.step()
+        
+        if (i + 1) % grad_accum_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
         
         epoch_loss += loss.item()
     
@@ -115,9 +125,11 @@ def evaluate(model, loader, criterion, device):
     
     return epoch_loss / len(loader)
 
-# Training loop
+# Training loop with mixed precision
+scaler = torch.cuda.amp.GradScaler()
+
 for epoch in range(num_epochs):
-    train_loss = train(model, train_loader, criterion, optimizer, device)
+    train_loss = train(model, train_loader, criterion, optimizer, device, grad_accum_steps)
     val_loss = evaluate(model, val_loader, criterion, device)
     print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
